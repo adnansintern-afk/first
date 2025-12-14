@@ -4,7 +4,7 @@ import {
   ChevronRight, Loader2, X, Copy, Zap, Send, MousePointerClick
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { CampaignService } from '../services/campaignService';
 import { supabase } from '../lib/supabase';
 
@@ -66,16 +66,18 @@ type Step = 'details' | 'audience' | 'content' | 'launch';
 const CampaignWizard: React.FC = () => {
   const navigate = useNavigate();
   const { restaurant } = useAuth();
+  const { campaignId } = useParams<{ campaignId?: string }>();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
-  
+
   const [currentStep, setCurrentStep] = useState<Step>('details');
   const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(!!campaignId);
   const [toast, setToast] = useState<{msg: string, type: 'error' | 'success'} | null>(null);
-  
+
   const [formData, setFormData] = useState({
     name: '',
     description: '',
-    audience_type: 'all', 
+    audience_type: 'all',
     notification_title: '',
     notification_body: '',
     deep_link: 'home', // 'home', 'menu', 'promotions', 'wallet'
@@ -94,12 +96,42 @@ const CampaignWizard: React.FC = () => {
 
   // --- LOGIC ---
 
+  // Load existing campaign if in edit mode
+  useEffect(() => {
+    if (campaignId && restaurant) {
+      loadCampaign();
+    }
+  }, [campaignId, restaurant]);
+
+  const loadCampaign = async () => {
+    if (!restaurant || !campaignId) return;
+    try {
+      setInitialLoading(true);
+      const campaign = await CampaignService.getCampaign(restaurant.id, campaignId);
+      setFormData({
+        name: campaign.name || '',
+        description: campaign.description || '',
+        audience_type: campaign.audience_type || 'all',
+        notification_title: campaign.notification_title || '',
+        notification_body: campaign.notification_body || '',
+        deep_link: campaign.deep_link || 'home',
+        scheduled_at: campaign.scheduled_at ? new Date(campaign.scheduled_at).toISOString().slice(0, 16) : '',
+        estimated_audience_size: campaign.estimated_audience_size || 0,
+      });
+    } catch (error) {
+      console.error('Error loading campaign:', error);
+      showToast('Failed to load campaign');
+    } finally {
+      setInitialLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!restaurant) return;
     const fetchCount = async () => {
       try {
         let query = supabase.from('customers').select('*', { count: 'exact', head: true }).eq('restaurant_id', restaurant.id).not('push_token', 'is', null);
-        if (formData.audience_type === 'active') query = query.gt('total_points', 0); 
+        if (formData.audience_type === 'active') query = query.gt('total_points', 0);
         const { count } = await query;
         if (count !== null) setFormData(prev => ({ ...prev, estimated_audience_size: count }));
       } catch (err) { console.error(err); }
@@ -144,12 +176,21 @@ const CampaignWizard: React.FC = () => {
         status: status === 'sending' ? 'sending' : status,
         type: status === 'scheduled' ? 'scheduled' : 'one_time',
         scheduled_at: status === 'scheduled' ? new Date(formData.scheduled_at).toISOString() : null,
+        message_template: formData.notification_body, // For compatibility
       };
 
-      const newCampaign = await CampaignService.createCampaign(restaurant.id, payload);
-      if (status === 'sending') await CampaignService.sendCampaign(newCampaign.id, false);
+      let campaign;
+      if (campaignId) {
+        // Update existing campaign
+        campaign = await CampaignService.updateCampaign(restaurant.id, campaignId, payload);
+      } else {
+        // Create new campaign
+        campaign = await CampaignService.createCampaign(restaurant.id, payload);
+      }
 
-      showToast('Campaign saved successfully!', 'success');
+      if (status === 'sending') await CampaignService.sendCampaign(campaign.id, false);
+
+      showToast(campaignId ? 'Campaign updated successfully!' : 'Campaign saved successfully!', 'success');
       setTimeout(() => navigate('/dashboard/campaigns'), 1000);
     } catch (error: any) {
       showToast('Launch failed: ' + error.message);
@@ -215,6 +256,17 @@ const CampaignWizard: React.FC = () => {
   };
 
   // --- UI RENDER ---
+
+  if (initialLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 text-[#E85A9B] animate-spin mx-auto mb-4" />
+          <p className="text-gray-600 font-medium">Loading campaign...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900 flex justify-center p-4 lg:p-8">
